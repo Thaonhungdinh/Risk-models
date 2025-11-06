@@ -1,0 +1,143 @@
+"""
+PCA-Based Portfolio vs Benchmark Risk Analysis
+30 portfolio assets, 40 benchmark assets, up to 50 PCA factors
+Includes risk decomposition, factor betas, VaR, and factor overlap
+"""
+
+import numpy as np
+import pandas as pd
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LinearRegression
+import matplotlib.pyplot as plt
+import seaborn as sns
+from numpy.linalg import norm
+import warnings
+warnings.filterwarnings('ignore')
+
+np.random.seed(42)
+
+class PortfolioRiskAnalyzer:
+    def __init__(self, n_assets_port=30, n_assets_bench=40, n_factors=50, n_periods=1000):
+        self.n_assets_port = n_assets_port
+        self.n_assets_bench = n_assets_bench
+        self.n_factors = n_factors
+        self.n_periods = n_periods
+
+    def generate_sample_data(self):
+        # Generate correlated returns
+        market_factor = np.random.randn(self.n_periods, 1) * 0.03
+        sector_factors = np.random.randn(self.n_periods, 5) * 0.02
+
+        # Portfolio returns
+        port_returns = np.random.randn(self.n_periods, self.n_assets_port) * 0.02
+        port_returns += market_factor @ np.random.rand(1, self.n_assets_port)
+        port_returns += sector_factors @ (np.random.rand(5, self.n_assets_port)*0.5)
+        portfolio_df = pd.DataFrame(port_returns, 
+                                    columns=[f'Asset_P{i+1}' for i in range(self.n_assets_port)],
+                                    index=pd.date_range('2020-01-01', periods=self.n_periods))
+
+        # Benchmark returns
+        bench_returns = np.random.randn(self.n_periods, self.n_assets_bench) * 0.02
+        bench_returns += market_factor @ np.random.rand(1, self.n_assets_bench)
+        bench_returns += sector_factors @ (np.random.rand(5, self.n_assets_bench)*0.5)
+        benchmark_df = pd.DataFrame(bench_returns,
+                                    columns=[f'Asset_B{i+1}' for i in range(self.n_assets_bench)],
+                                    index=pd.date_range('2020-01-01', periods=self.n_periods))
+        return portfolio_df, benchmark_df
+
+    def fit_pca(self, returns_df, n_factors_actual):
+        scaler = StandardScaler()
+        scaled = scaler.fit_transform(returns_df)
+        pca = PCA(n_components=n_factors_actual)
+        factors = pca.fit_transform(scaled)
+        return pca, factors, scaler
+
+    def decompose_risk(self, returns_df, pca, factors, scaler):
+        reconstructed = scaler.inverse_transform(pca.inverse_transform(factors))
+        residuals = returns_df.values - reconstructed
+
+        total_var = np.var(returns_df.values, axis=0)
+        sys_var = np.var(reconstructed, axis=0)
+        spec_var = np.var(residuals, axis=0)
+
+        total_risk = np.sqrt(total_var)
+        sys_risk = np.sqrt(sys_var)
+        spec_risk = np.sqrt(spec_var)
+
+        risk_df = pd.DataFrame({
+            'Asset': returns_df.columns,
+            'Total_Risk': total_risk,
+            'Systematic_Risk': sys_risk,
+            'Specific_Risk': spec_risk,
+            'Total_Variance': total_var,
+            'Systematic_Variance': sys_var,
+            'Specific_Variance': spec_var,
+            'Systematic_Pct': sys_var/total_var*100,
+            'Specific_Pct': spec_var/total_var*100,
+            'R_Squared': sys_var/total_var
+        })
+        return risk_df, residuals
+
+    def calculate_factor_betas(self, returns_df, factors):
+        betas = []
+        r2_list = []
+        for i in range(returns_df.shape[1]):
+            y = returns_df.iloc[:, i].values
+            reg = LinearRegression().fit(factors, y)
+            betas.append(reg.coef_)
+            r2_list.append(reg.score(factors, y))
+        beta_df = pd.DataFrame(betas, columns=[f'Factor_{i+1}' for i in range(factors.shape[1])], index=returns_df.columns)
+        beta_df['R_Squared'] = r2_list
+        return beta_df
+
+    def calculate_var(self, returns_df, alpha=0.05):
+        return returns_df.quantile(alpha, axis=0)
+
+    def factor_overlap(self, beta_port, beta_bench):
+        # Take mean beta across assets for portfolio and benchmark
+        port = beta_port.drop('R_Squared', axis=1).mean(axis=0).values
+        bench = beta_bench.drop('R_Squared', axis=1).mean(axis=0).values
+        return np.dot(port, bench)/(norm(port)*norm(bench))
+
+def main():
+    analyzer = PortfolioRiskAnalyzer(n_assets_port=30, n_assets_bench=40, n_factors=50, n_periods=1000)
+    
+    # 1. Generate data
+    portfolio_df, benchmark_df = analyzer.generate_sample_data()
+    
+    # 2. Determine PCA factors (limited by smallest of assets and periods)
+    n_factors_actual = min(analyzer.n_factors, analyzer.n_assets_port, analyzer.n_assets_bench, analyzer.n_periods)
+    
+    # 3. PCA
+    pca_port, factors_port, scaler_port = analyzer.fit_pca(portfolio_df, n_factors_actual)
+    pca_bench, factors_bench, scaler_bench = analyzer.fit_pca(benchmark_df, n_factors_actual)
+    
+    # 4. Risk decomposition
+    risk_port, _ = analyzer.decompose_risk(portfolio_df, pca_port, factors_port, scaler_port)
+    risk_bench, _ = analyzer.decompose_risk(benchmark_df, pca_bench, factors_bench, scaler_bench)
+    
+    # 5. Factor betas
+    beta_port = analyzer.calculate_factor_betas(portfolio_df, factors_port)
+    beta_bench = analyzer.calculate_factor_betas(benchmark_df, factors_bench)
+    
+    # 6. VaR at 5%
+    var_port = analyzer.calculate_var(portfolio_df, 0.05)
+    var_bench = analyzer.calculate_var(benchmark_df, 0.05)
+    
+    # 7. Factor overlap
+    overlap = analyzer.factor_overlap(beta_port, beta_bench)
+    
+    # 8. Print summary
+    print("\nPortfolio Risk Summary:")
+    print(risk_port.describe())
+    print("\nBenchmark Risk Summary:")
+    print(risk_bench.describe())
+    print("\nPortfolio 5% VaR (per asset):")
+    print(var_port)
+    print("\nBenchmark 5% VaR (per asset):")
+    print(var_bench)
+    print(f"\nFactor exposure overlap (cosine similarity): {overlap:.4f}")
+
+if __name__ == "__main__":
+    main()
